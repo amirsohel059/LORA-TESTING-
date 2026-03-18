@@ -21,21 +21,44 @@ static const int EEPROM_SIZE      = 8;
 static const int EEPROM_SEQ_ADDR  = 0;
 
 // ================== TX behavior ==================
-static const uint8_t  TX_REPEATS        = 4;     // send multiple times for reliability
-static const uint16_t TX_REPEAT_GAP_MS  = 120;   // gap between repeated packets
+static const uint8_t  TX_REPEATS        = 4;
+static const uint16_t TX_REPEAT_GAP_MS  = 120;
 
 // Persist sequence across reset/deep sleep wake
 static uint32_t seq = 0;
 
-// Kept only to preserve structure (not used)
-static uint32_t lastPressMs = 0;
+// ================== DCI protocol ==================
+static const uint8_t DCI_MAGIC1  = 0x44;   // 'D'
+static const uint8_t DCI_MAGIC2  = 0x43;   // 'C'
+static const uint8_t DCI_VERSION = 0x01;
+
+// IMPORTANT:
+// Give each transmitter/receiver set a unique pair ID.
+// Matching transmitter + receiver must use the same pair ID.
+static const uint8_t DCI_PAIR_ID = 0x11;
+
+static const uint8_t DCI_CMD_TRIGGER   = 0x01;
+static const uint8_t DCI_CMD_HEARTBEAT = 0x02;
+static const uint8_t DCI_CMD_ACK       = 0x03;
+
+struct __attribute__((packed)) DciPacketV1 {
+  uint8_t  magic1;
+  uint8_t  magic2;
+  uint8_t  version;
+  uint8_t  pairId;
+  uint32_t seq;
+  uint8_t  cmd;
+  uint8_t  flags;
+  uint16_t reserved;
+};
+
+static_assert(sizeof(DciPacketV1) == 12, "Unexpected DciPacketV1 size");
 
 // ---------- EEPROM helpers ----------
 static uint32_t loadSeq() {
   uint32_t value = 0;
   EEPROM.get(EEPROM_SEQ_ADDR, value);
 
-  // Basic sanity check
   if (value == 0xFFFFFFFFUL) {
     value = 0;
   }
@@ -47,26 +70,46 @@ static void saveSeq(uint32_t value) {
   EEPROM.commit();
 }
 
-// ---------- Radio send ----------
-static bool sendOnePacket(const char* msg) {
+// ---------- Packet send ----------
+static bool sendOnePacket(const DciPacketV1& pkt) {
   LoRa.beginPacket();
-  LoRa.print(msg);
+  size_t written = LoRa.write((const uint8_t*)&pkt, sizeof(pkt));
   int ret = LoRa.endPacket();   // blocking send
-  return (ret == 1);
+  return (written == sizeof(pkt) && ret == 1);
 }
 
-static void sendBlinkCommand() {
+static void printPacket(const DciPacketV1& pkt) {
+  Serial.print("Packet: ");
+  Serial.print("pairId=0x");
+  Serial.print(pkt.pairId, HEX);
+  Serial.print(" seq=");
+  Serial.print(pkt.seq);
+  Serial.print(" cmd=");
+  Serial.print(pkt.cmd);
+  Serial.print(" flags=0x");
+  Serial.print(pkt.flags, HEX);
+  Serial.print(" reserved=0x");
+  Serial.println(pkt.reserved, HEX);
+}
+
+static void sendTriggerCommand() {
   seq++;
   saveSeq(seq);
 
-  char msg[32];
-  snprintf(msg, sizeof(msg), "BLINK,%lu", (unsigned long)seq);
+  DciPacketV1 pkt;
+  pkt.magic1   = DCI_MAGIC1;
+  pkt.magic2   = DCI_MAGIC2;
+  pkt.version  = DCI_VERSION;
+  pkt.pairId   = DCI_PAIR_ID;
+  pkt.seq      = seq;
+  pkt.cmd      = DCI_CMD_TRIGGER;
+  pkt.flags    = 0;
+  pkt.reserved = 0;
 
-  Serial.print("Prepared: ");
-  Serial.println(msg);
+  printPacket(pkt);
 
   for (uint8_t i = 0; i < TX_REPEATS; i++) {
-    bool ok = sendOnePacket(msg);
+    bool ok = sendOnePacket(pkt);
 
     Serial.print("TX ");
     Serial.print(i + 1);
@@ -78,8 +121,7 @@ static void sendBlinkCommand() {
     delay(TX_REPEAT_GAP_MS);
   }
 
-  Serial.print("Sent final: ");
-  Serial.println(msg);
+  Serial.println("Trigger packet send complete.");
 }
 
 void setup() {
@@ -92,7 +134,6 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // Kept only to preserve structure
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
   EEPROM.begin(EEPROM_SIZE);
@@ -102,39 +143,34 @@ void setup() {
   Serial.println("Starting LoRa TX (RFM96W 433MHz)...");
   Serial.print("Last stored seq = ");
   Serial.println(seq);
+  Serial.print("DCI pair ID = 0x");
+  Serial.println(DCI_PAIR_ID, HEX);
 
-  // Set LoRa control pins
   LoRa.setPins(PIN_LORA_SS, PIN_LORA_RST, PIN_LORA_DIO0);
 
   if (!LoRa.begin(433E6)) {
     Serial.println("LoRa begin failed! Check wiring / power / frequency.");
     delay(100);
-    ESP.deepSleep(0);   // sleep forever until reset
+    ESP.deepSleep(0);
   }
 
-  // ========== Long-range settings ==========
-  // MUST match the receiver exactly
+  // MUST match receiver exactly
   LoRa.enableCrc();
-  LoRa.setSpreadingFactor(12);        // longest range, slowest data rate
-  LoRa.setSignalBandwidth(62.5E3);    // narrower bandwidth = better sensitivity
-  LoRa.setCodingRate4(5);             // keep compatible/simple
+  LoRa.setSpreadingFactor(12);
+  LoRa.setSignalBandwidth(62.5E3);
+  LoRa.setCodingRate4(5);
   LoRa.setPreambleLength(12);
   LoRa.setSyncWord(0x12);
-
-  // Increase TX power
-  // RFM96W / SX1276 usually supports high power on PA_BOOST
   LoRa.setTxPower(20);
 
   Serial.println("Radio configured.");
   Serial.println("Sending command now...");
 
-  // Wake by RESET -> send immediately -> sleep again
-  sendBlinkCommand();
+  sendTriggerCommand();
 
   Serial.println("Going to deep sleep now. Wake again by RESET button.");
-  delay(200);   // allow UART + radio to fully finish
+  delay(200);
 
-  // Sleep forever until reset/wake event
   ESP.deepSleep(0);
 }
 
