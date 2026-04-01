@@ -10,7 +10,9 @@ static const int PIN_LORA_SS   = 7;   // GPIO7
 static const int PIN_LORA_RST  = 3;   // GPIO3
 static const int PIN_LORA_DIO0 = 2;   // GPIO2
 
-static const int PIN_RELAY     = 21;  // GPIO21
+// static const int PIN_RELAY     = 21;  // GPIO21
+
+static const int PIN_RELAY = 10;
 
 // ===== Relay logic =====
 static const uint8_t RELAY_ON_LEVEL  = HIGH;
@@ -25,8 +27,7 @@ static const uint8_t DCI_MAGIC1  = 0x44;   // 'D'
 static const uint8_t DCI_MAGIC2  = 0x43;   // 'C'
 static const uint8_t DCI_VERSION = 0x01;
 
-// IMPORTANT:
-// Must match the paired transmitter only.
+// Must match transmitter
 static const uint8_t DCI_PAIR_ID = 0x11;
 
 static const uint8_t DCI_CMD_TRIGGER   = 0x01;
@@ -46,9 +47,9 @@ struct __attribute__((packed)) DciPacketV1 {
 
 static_assert(sizeof(DciPacketV1) == 12, "Unexpected DciPacketV1 size");
 
-// Duplicate / old packet protection
-static uint32_t lastSeq = 0;
-static bool haveLastSeq = false;
+// Only block exact duplicate of same press burst
+static uint32_t lastAcceptedSeq = 0;
+static bool haveLastAcceptedSeq = false;
 
 // ---------- Relay helpers ----------
 static void relayOff() {
@@ -89,22 +90,14 @@ static bool isPacketValidBasic(const DciPacketV1& pkt) {
   return true;
 }
 
-static bool isPacketNew(uint32_t seq) {
-  if (!haveLastSeq) {
+// Reject only exact duplicate packets from the same transmit burst
+static bool isExactDuplicate(uint32_t seq) {
+  if (haveLastAcceptedSeq && seq == lastAcceptedSeq) {
+    Serial.print("Rejected: duplicate seq ");
+    Serial.println(seq);
     return true;
   }
-
-  // Accept only newer sequence number
-  if (seq <= lastSeq) {
-    Serial.print("Rejected: duplicate/old seq ");
-    Serial.print(seq);
-    Serial.print(" (last=");
-    Serial.print(lastSeq);
-    Serial.println(")");
-    return false;
-  }
-
-  return true;
+  return false;
 }
 
 static void printPacket(const DciPacketV1& pkt, int rssi, float snr) {
@@ -130,12 +123,12 @@ static void handlePacket(const DciPacketV1& pkt, int rssi, float snr) {
     return;
   }
 
-  if (!isPacketNew(pkt.seq)) {
+  if (isExactDuplicate(pkt.seq)) {
     return;
   }
 
-  lastSeq = pkt.seq;
-  haveLastSeq = true;
+  lastAcceptedSeq = pkt.seq;
+  haveLastAcceptedSeq = true;
 
   printPacket(pkt, rssi, snr);
 
@@ -158,7 +151,6 @@ void setup() {
   Serial.println(DCI_PAIR_ID, HEX);
 
   SPI.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_SS);
-
   LoRa.setPins(PIN_LORA_SS, PIN_LORA_RST, PIN_LORA_DIO0);
 
   if (!LoRa.begin(433E6)) {
@@ -168,12 +160,16 @@ void setup() {
     }
   }
 
+  // MUST match transmitter exactly
   LoRa.enableCrc();
   LoRa.setSpreadingFactor(12);
   LoRa.setSignalBandwidth(62.5E3);
   LoRa.setCodingRate4(5);
   LoRa.setPreambleLength(12);
   LoRa.setSyncWord(0x12);
+
+  // Start continuous receive
+  LoRa.receive();
 
   Serial.println("LoRa RX ready. Waiting for packets...");
   Serial.println("Relay default state: OFF");
@@ -182,9 +178,6 @@ void setup() {
 void loop() {
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
-    Serial.print("Packet received, size=");
-    Serial.println(packetSize);
-
     if (packetSize != (int)sizeof(DciPacketV1)) {
       Serial.print("Rejected: unexpected packet size ");
       Serial.print(packetSize);
@@ -194,6 +187,9 @@ void loop() {
       while (LoRa.available()) {
         LoRa.read();
       }
+
+      // Return to RX mode immediately
+      LoRa.receive();
       return;
     }
 
@@ -207,10 +203,14 @@ void loop() {
 
     if (idx != sizeof(DciPacketV1)) {
       Serial.println("Rejected: incomplete packet read");
+      LoRa.receive();
       return;
     }
 
     handlePacket(pkt, LoRa.packetRssi(), LoRa.packetSnr());
+
+    // Return to RX mode immediately after handling
+    LoRa.receive();
   }
 
   if (relayOffAtMs != 0 && (int32_t)(millis() - relayOffAtMs) >= 0) {

@@ -1,8 +1,8 @@
 #include <SPI.h>
 #include <LoRa.h>
 #include <ESP8266WiFi.h>
-#include <ArduinoOTA.h>
 #include <EEPROM.h>
+#include "ota_helper.h"
 
 // ================== NodeMCU ↔ RFM96 wiring ==================
 // Hardware SPI on ESP8266:
@@ -44,29 +44,6 @@ static uint32_t seq = 0;
 
 // Kept only to preserve structure (not used)
 static uint32_t lastPressMs = 0;
-
-static bool otaMode = false;
-static unsigned long lastLedToggleMs = 0;
-static bool ledState = false;
-static uint8_t lastOtaPercent = 255;
-
-// ---------- LED helpers ----------
-static void ledOn() {
-  digitalWrite(PIN_STATUS_LED, LOW);   // active LOW
-}
-
-static void ledOff() {
-  digitalWrite(PIN_STATUS_LED, HIGH);  // active LOW
-}
-
-static void blinkLedInOtaMode() {
-  unsigned long now = millis();
-  if (now - lastLedToggleMs >= 250) {
-    lastLedToggleMs = now;
-    ledState = !ledState;
-    digitalWrite(PIN_STATUS_LED, ledState ? LOW : HIGH);
-  }
-}
 
 // ---------- EEPROM helpers ----------
 static uint32_t loadSeq() {
@@ -119,108 +96,6 @@ static void sendBlinkCommand() {
   Serial.println(msg);
 }
 
-// ---------- OTA mode check ----------
-static bool shouldEnterOtaMode() {
-  pinMode(PIN_OTA_BUTTON, INPUT_PULLUP);
-  delay(20);  // small settle time
-
-  // Button pressed -> pin reads LOW
-  if (digitalRead(PIN_OTA_BUTTON) == LOW) {
-    delay(30);
-    if (digitalRead(PIN_OTA_BUTTON) == LOW) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// ---------- OTA setup ----------
-static void startOtaMode() {
-  otaMode = true;
-
-  Serial.println();
-  Serial.println("OTA button detected.");
-  Serial.println("Entering OTA mode...");
-
-  ledOff();
-  delay(100);
-  ledOn();
-  delay(100);
-  ledOff();
-
-  WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-    blinkLedInOtaMode();
-  }
-
-  Serial.println();
-  Serial.print("WiFi connected. IP: ");
-  Serial.println(WiFi.localIP());
-
-  ArduinoOTA.setHostname(OTA_HOSTNAME);
-  ArduinoOTA.setPassword(OTA_PASSWORD);
-
-  ArduinoOTA.onStart([]() {
-    Serial.println("OTA Start");
-    ledOn();
-    lastOtaPercent = 255;
-  });
-
-  ArduinoOTA.onEnd([]() {
-    Serial.println();
-    Serial.println("OTA End");
-    ledOff();
-  });
-
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    uint8_t percent = (progress * 100) / total;
-
-    // Print only when value changes by 10% to reduce spam
-    if (lastOtaPercent == 255 || percent >= lastOtaPercent + 10 || percent == 100) {
-      Serial.print("OTA Progress: ");
-      Serial.print(percent);
-      Serial.println("%");
-      lastOtaPercent = percent;
-    }
-  });
-
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.print("OTA Error[");
-    Serial.print((int)error);
-    Serial.print("]: ");
-
-    if (error == OTA_AUTH_ERROR) {
-      Serial.println("Auth Failed");
-    } else if (error == OTA_BEGIN_ERROR) {
-      Serial.println("Begin Failed");
-    } else if (error == OTA_CONNECT_ERROR) {
-      Serial.println("Connect Failed");
-    } else if (error == OTA_RECEIVE_ERROR) {
-      Serial.println("Receive Failed");
-    } else if (error == OTA_END_ERROR) {
-      Serial.println("End Failed");
-    } else {
-      Serial.println("Unknown Error");
-    }
-  });
-
-  ArduinoOTA.begin();
-
-  Serial.println("OTA Ready");
-  Serial.print("Hostname: ");
-  Serial.println(OTA_HOSTNAME);
-  Serial.print("Password: ");
-  Serial.println(OTA_PASSWORD);
-  Serial.println("Select the network port in Arduino IDE and upload wirelessly.");
-  Serial.println("Board will remain in OTA mode until reset/power cycle.");
-}
-
 // ---------- Normal LoRa operation ----------
 static void runNormalOperation() {
   // Power saving: disable WiFi fully
@@ -269,14 +144,13 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  pinMode(PIN_STATUS_LED, OUTPUT);
-  ledOff();
+  otaInitPins(PIN_STATUS_LED, PIN_OTA_BUTTON);
 
   // Existing structure preserved
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
   if (shouldEnterOtaMode()) {
-    startOtaMode();
+    startOtaMode(WIFI_SSID, WIFI_PASS, OTA_HOSTNAME, OTA_PASSWORD);
     return;
   }
 
@@ -284,8 +158,7 @@ void setup() {
 }
 
 void loop() {
-  if (otaMode) {
-    ArduinoOTA.handle();
-    blinkLedInOtaMode();
+  if (isOtaModeActive()) {
+    handleOtaMode();
   }
 }
