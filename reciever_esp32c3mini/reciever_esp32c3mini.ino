@@ -17,7 +17,7 @@ static const uint8_t RELAY_ON_LEVEL  = HIGH;
 static const uint8_t RELAY_OFF_LEVEL = LOW;
 
 // Relay ON time after valid command
-static const uint32_t RELAY_ON_MS = 25000;
+static const uint32_t RELAY_ON_MS = 1000;
 static uint32_t relayOffAtMs = 0;
 
 // ================== DCI protocol ==================
@@ -25,8 +25,7 @@ static const uint8_t DCI_MAGIC1  = 0x44;   // 'D'
 static const uint8_t DCI_MAGIC2  = 0x43;   // 'C'
 static const uint8_t DCI_VERSION = 0x01;
 
-// IMPORTANT:
-// Must match the paired transmitter only.
+// Must match TX
 static const uint8_t DCI_PAIR_ID = 0x11;
 
 static const uint8_t DCI_CMD_TRIGGER   = 0x01;
@@ -94,7 +93,6 @@ static bool isPacketNew(uint32_t seq) {
     return true;
   }
 
-  // Accept only newer sequence number
   if (seq <= lastSeq) {
     Serial.print("Rejected: duplicate/old seq ");
     Serial.print(seq);
@@ -168,11 +166,12 @@ void setup() {
     }
   }
 
+  // Low-latency profile - must match TX
   LoRa.enableCrc();
-  LoRa.setSpreadingFactor(12);
-  LoRa.setSignalBandwidth(62.5E3);
+  LoRa.setSpreadingFactor(7);
+  LoRa.setSignalBandwidth(125E3);
   LoRa.setCodingRate4(5);
-  LoRa.setPreambleLength(12);
+  LoRa.setPreambleLength(8);
   LoRa.setSyncWord(0x12);
 
   Serial.println("LoRa RX ready. Waiting for packets...");
