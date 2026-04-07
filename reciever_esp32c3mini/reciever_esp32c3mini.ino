@@ -1,6 +1,34 @@
 #include <SPI.h>
 #include <LoRa.h>
 
+// ============================================================
+// Build / behavior switches
+// ============================================================
+#define ENABLE_LOGGING  1     //enable all logs, change:
+// #define ENABLE_LOGGING  0  	  //disable all logs, change:
+#define LOG_BAUD        115200
+
+// ============================================================
+// Logging macros
+// ============================================================
+#if ENABLE_LOGGING
+  #define LOG_BEGIN()         do { Serial.begin(LOG_BAUD); } while (0)
+  #define LOG_FLUSH()         do { Serial.flush(); } while (0)
+  #define LOG_NL()            do { Serial.println(); } while (0)
+  #define LOG_PRINT(x)        do { Serial.print(x); } while (0)
+  #define LOG_PRINTLN(x)      do { Serial.println(x); } while (0)
+  #define LOG_PRINT_HEX(x)    do { Serial.print((x), HEX); } while (0)
+  #define LOG_PRINTLN_HEX(x)  do { Serial.println((x), HEX); } while (0)
+#else
+  #define LOG_BEGIN()         do {} while (0)
+  #define LOG_FLUSH()         do {} while (0)
+  #define LOG_NL()            do {} while (0)
+  #define LOG_PRINT(x)        do {} while (0)
+  #define LOG_PRINTLN(x)      do {} while (0)
+  #define LOG_PRINT_HEX(x)    do {} while (0)
+  #define LOG_PRINTLN_HEX(x)  do {} while (0)
+#endif
+
 // ===== ESP32-C3 Super Mini pin mapping =====
 static const int PIN_LORA_SCK  = 4;   // GPIO4
 static const int PIN_LORA_MISO = 5;   // GPIO5
@@ -45,6 +73,9 @@ struct __attribute__((packed)) DciPacketV1 {
 
 static_assert(sizeof(DciPacketV1) == 12, "Unexpected DciPacketV1 size");
 
+// subtle internal build mark
+static const char kBuildMark[] = "asx-98";
+
 // Duplicate / old packet protection
 static uint32_t lastSeq = 0;
 static bool haveLastSeq = false;
@@ -61,27 +92,27 @@ static void relayOn() {
 // ---------- Packet validation ----------
 static bool isPacketValidBasic(const DciPacketV1& pkt) {
   if (pkt.magic1 != DCI_MAGIC1 || pkt.magic2 != DCI_MAGIC2) {
-    Serial.println("Rejected: bad magic");
+    LOG_PRINTLN("Rejected: bad magic");
     return false;
   }
 
   if (pkt.version != DCI_VERSION) {
-    Serial.print("Rejected: unsupported version ");
-    Serial.println(pkt.version);
+    LOG_PRINT("Rejected: unsupported version ");
+    LOG_PRINTLN(pkt.version);
     return false;
   }
 
   if (pkt.pairId != DCI_PAIR_ID) {
-    Serial.print("Rejected: pairId mismatch. RX expects 0x");
-    Serial.print(DCI_PAIR_ID, HEX);
-    Serial.print(", got 0x");
-    Serial.println(pkt.pairId, HEX);
+    LOG_PRINT("Rejected: pairId mismatch. RX expects 0x");
+    LOG_PRINT_HEX(DCI_PAIR_ID);
+    LOG_PRINT(", got 0x");
+    LOG_PRINTLN_HEX(pkt.pairId);
     return false;
   }
 
   if (pkt.cmd != DCI_CMD_TRIGGER) {
-    Serial.print("Rejected: unsupported cmd ");
-    Serial.println(pkt.cmd);
+    LOG_PRINT("Rejected: unsupported cmd ");
+    LOG_PRINTLN(pkt.cmd);
     return false;
   }
 
@@ -94,11 +125,11 @@ static bool isPacketNew(uint32_t seq) {
   }
 
   if (seq <= lastSeq) {
-    Serial.print("Rejected: duplicate/old seq ");
-    Serial.print(seq);
-    Serial.print(" (last=");
-    Serial.print(lastSeq);
-    Serial.println(")");
+    LOG_PRINT("Rejected: duplicate/old seq ");
+    LOG_PRINT(seq);
+    LOG_PRINT(" (last=");
+    LOG_PRINT(lastSeq);
+    LOG_PRINTLN(")");
     return false;
   }
 
@@ -106,21 +137,20 @@ static bool isPacketNew(uint32_t seq) {
 }
 
 static void printPacket(const DciPacketV1& pkt, int rssi, float snr) {
-  Serial.print("Valid packet: ");
-  Serial.print("pairId=0x");
-  Serial.print(pkt.pairId, HEX);
-  Serial.print(" seq=");
-  Serial.print(pkt.seq);
-  Serial.print(" cmd=");
-  Serial.print(pkt.cmd);
-  Serial.print(" flags=0x");
-  Serial.print(pkt.flags, HEX);
-  Serial.print(" reserved=0x");
-  Serial.print(pkt.reserved, HEX);
-  Serial.print(" | RSSI=");
-  Serial.print(rssi);
-  Serial.print(" | SNR=");
-  Serial.println(snr);
+  LOG_PRINT("Valid packet: pairId=0x");
+  LOG_PRINT_HEX(pkt.pairId);
+  LOG_PRINT(" seq=");
+  LOG_PRINT(pkt.seq);
+  LOG_PRINT(" cmd=");
+  LOG_PRINT(pkt.cmd);
+  LOG_PRINT(" flags=0x");
+  LOG_PRINT_HEX(pkt.flags);
+  LOG_PRINT(" reserved=0x");
+  LOG_PRINT_HEX(pkt.reserved);
+  LOG_PRINT(" | RSSI=");
+  LOG_PRINT(rssi);
+  LOG_PRINT(" | SNR=");
+  LOG_PRINTLN(snr);
 }
 
 static void handlePacket(const DciPacketV1& pkt, int rssi, float snr) {
@@ -140,33 +170,34 @@ static void handlePacket(const DciPacketV1& pkt, int rssi, float snr) {
   relayOn();
   relayOffAtMs = millis() + RELAY_ON_MS;
 
-  Serial.println("RELAY ON");
+  LOG_PRINTLN("RELAY ON");
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(200);
+  LOG_BEGIN();
 
   pinMode(PIN_RELAY, OUTPUT);
   relayOff();
 
-  Serial.println();
-  Serial.println("LoRa RX Relay (RFM96W 433MHz) starting...");
-  Serial.print("DCI pair ID = 0x");
-  Serial.println(DCI_PAIR_ID, HEX);
+  LOG_NL();
+  LOG_PRINTLN("LoRa RX Relay (RFM96W 433MHz) starting...");
+  LOG_PRINT("DCI pair ID = 0x");
+  LOG_PRINTLN_HEX(DCI_PAIR_ID);
 
   SPI.begin(PIN_LORA_SCK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_SS);
-
   LoRa.setPins(PIN_LORA_SS, PIN_LORA_RST, PIN_LORA_DIO0);
 
   if (!LoRa.begin(433E6)) {
-    Serial.println("LoRa begin failed! Check wiring / power / frequency.");
+    LOG_PRINTLN("LoRa begin failed! Check wiring / power / frequency.");
+    LOG_FLUSH();
+
+    // only fatal fallback delay to avoid watchdog issues
     while (true) {
-      delay(1000);
+      delay(1);
     }
   }
 
-  // Low-latency profile - must match TX
+  // Must match transmitter exactly
   LoRa.enableCrc();
   LoRa.setSpreadingFactor(7);
   LoRa.setSignalBandwidth(125E3);
@@ -174,21 +205,22 @@ void setup() {
   LoRa.setPreambleLength(8);
   LoRa.setSyncWord(0x12);
 
-  Serial.println("LoRa RX ready. Waiting for packets...");
-  Serial.println("Relay default state: OFF");
+  LOG_PRINTLN("LoRa RX ready. Waiting for packets...");
+  LOG_PRINTLN("Relay default state: OFF");
 }
 
 void loop() {
   int packetSize = LoRa.parsePacket();
-  if (packetSize) {
-    Serial.print("Packet received, size=");
-    Serial.println(packetSize);
+
+  if (packetSize > 0) {
+    LOG_PRINT("Packet received, size=");
+    LOG_PRINTLN(packetSize);
 
     if (packetSize != (int)sizeof(DciPacketV1)) {
-      Serial.print("Rejected: unexpected packet size ");
-      Serial.print(packetSize);
-      Serial.print(", expected ");
-      Serial.println(sizeof(DciPacketV1));
+      LOG_PRINT("Rejected: unexpected packet size ");
+      LOG_PRINT(packetSize);
+      LOG_PRINT(", expected ");
+      LOG_PRINTLN(sizeof(DciPacketV1));
 
       while (LoRa.available()) {
         LoRa.read();
@@ -205,7 +237,7 @@ void loop() {
     }
 
     if (idx != sizeof(DciPacketV1)) {
-      Serial.println("Rejected: incomplete packet read");
+      LOG_PRINTLN("Rejected: incomplete packet read");
       return;
     }
 
@@ -215,6 +247,6 @@ void loop() {
   if (relayOffAtMs != 0 && (int32_t)(millis() - relayOffAtMs) >= 0) {
     relayOff();
     relayOffAtMs = 0;
-    Serial.println("RELAY OFF");
+    LOG_PRINTLN("RELAY OFF");
   }
 }
