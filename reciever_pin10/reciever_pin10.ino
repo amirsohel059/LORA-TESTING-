@@ -10,16 +10,16 @@ static const int PIN_LORA_SS   = 7;   // GPIO7
 static const int PIN_LORA_RST  = 3;   // GPIO3
 static const int PIN_LORA_DIO0 = 2;   // GPIO2
 
-// static const int PIN_RELAY     = 21;  // GPIO21
+static const int PIN_RELAY     = 21;  // GPIO21
 
-static const int PIN_RELAY = 10;
+// static const int PIN_RELAY = 10;
 
 // ===== Relay logic =====
 static const uint8_t RELAY_ON_LEVEL  = HIGH;
 static const uint8_t RELAY_OFF_LEVEL = LOW;
 
 // Relay ON time after valid command
-static const uint32_t RELAY_ON_MS = 25000;
+static const uint32_t RELAY_ON_MS = 1000;
 static uint32_t relayOffAtMs = 0;
 
 // ================== DCI protocol ==================
