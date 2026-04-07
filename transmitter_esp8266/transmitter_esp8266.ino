@@ -4,68 +4,96 @@
 #include <EEPROM.h>
 #include <ArduinoOTA.h>
 
+// ============================================================
+// Build / behavior switches
+// ============================================================
+#define ENABLE_LOGGING  1   //To enable all logs
+// #define ENABLE_LOGGING  0   //To disable all logs
+#define LOG_BAUD        9600
+// #define LOG_BAUD        115200
+
+// ============================================================
+// Logging macros
+// ============================================================
+#if ENABLE_LOGGING
+  #define LOG_BEGIN()         do { Serial.begin(LOG_BAUD); } while (0)
+  #define LOG_FLUSH()         do { Serial.flush(); } while (0)
+  #define LOG_NL()            do { Serial.println(); } while (0)
+  #define LOG_PRINT(x)        do { Serial.print(x); } while (0)
+  #define LOG_PRINTLN(x)      do { Serial.println(x); } while (0)
+  #define LOG_PRINT_HEX(x)    do { Serial.print((x), HEX); } while (0)
+  #define LOG_PRINTLN_HEX(x)  do { Serial.println((x), HEX); } while (0)
+#else
+  #define LOG_BEGIN()         do {} while (0)
+  #define LOG_FLUSH()         do {} while (0)
+  #define LOG_NL()            do {} while (0)
+  #define LOG_PRINT(x)        do {} while (0)
+  #define LOG_PRINTLN(x)      do {} while (0)
+  #define LOG_PRINT_HEX(x)    do {} while (0)
+  #define LOG_PRINTLN_HEX(x)  do {} while (0)
+#endif
+
 // ================== NodeMCU ↔ RFM96 wiring ==================
 // Hardware SPI on ESP8266:
 // SCK  = D5 (GPIO14)
 // MISO = D6 (GPIO12)
 // MOSI = D7 (GPIO13)
 
-static const int PIN_LORA_SS = D8;    // GPIO15
-static const int PIN_LORA_RST = D1;   // GPIO5
+static const int PIN_LORA_SS   = D8;  // GPIO15
+static const int PIN_LORA_RST  = D1;  // GPIO5
 static const int PIN_LORA_DIO0 = D2;  // GPIO4
 
-// Existing button kept unchanged
-static const int PIN_BUTTON = D3;  // GPIO0
+// Existing user button / trigger pin kept as-is
+// static const int PIN_BUTTON    = D3;  // GPIO0
 
 // ================== OTA control ==================
-// Connect a temporary push button between GPIO3 (RX) and GND
-// Hold button during power-up / reset to enter OTA mode
-static const int PIN_OTA_BUTTON = 3;            // GPIO3 / RX
-static const int PIN_STATUS_LED = LED_BUILTIN;  // usually active LOW on NodeMCU
+// Hold GPIO3 (RX) LOW during power-up/reset to enter OTA mode
+static const int PIN_OTA_BUTTON = 3;             // GPIO3 / RX
+static const int PIN_STATUS_LED = LED_BUILTIN;   // active LOW on most NodeMCU boards
 
-// ================== WiFi for OTA ==================
-const char* WIFI_SSID = "red";
-const char* WIFI_PASS = "amir@1212";
-const char* OTA_HOSTNAME = "REZLER_DCI";
+// ================== WiFi / OTA ==================
+const char* WIFI_SSID    = "red";
+const char* WIFI_PASS    = "amir@1212";
+const char* OTA_HOSTNAME = "REZLER_TX";
 const char* OTA_PASSWORD = "1234";
 
 // ================== EEPROM ==================
-static const int EEPROM_SIZE = 8;
-static const int EEPROM_SEQ_ADDR = 0;
+static const int EEPROM_SIZE      = 8;
+static const int EEPROM_SEQ_ADDR  = 0;
 
 // ================== TX behavior ==================
-static const uint8_t TX_REPEATS = 4;
-static const uint16_t TX_REPEAT_GAP_MS = 120;
+// Reduced for lower latency while keeping one backup send
+static const uint8_t  TX_REPEATS       = 2;
+static const uint16_t TX_REPEAT_GAP_MS = 15;
 
-// Persist sequence across reset/deep sleep wake
+// Persist sequence across reset / wake
 static uint32_t seq = 0;
 
 // ================== DCI protocol ==================
-static const uint8_t DCI_MAGIC1 = 0x44;  // 'D'
-static const uint8_t DCI_MAGIC2 = 0x43;  // 'C'
+static const uint8_t DCI_MAGIC1  = 0x44;   // 'D'
+static const uint8_t DCI_MAGIC2  = 0x43;   // 'C'
 static const uint8_t DCI_VERSION = 0x01;
-
-// IMPORTANT:
-// Give each transmitter/receiver set a unique pair ID.
-// Matching transmitter + receiver must use the same pair ID.
 static const uint8_t DCI_PAIR_ID = 0x11;
 
-static const uint8_t DCI_CMD_TRIGGER = 0x01;
+static const uint8_t DCI_CMD_TRIGGER   = 0x01;
 static const uint8_t DCI_CMD_HEARTBEAT = 0x02;
-static const uint8_t DCI_CMD_ACK = 0x03;
+static const uint8_t DCI_CMD_ACK       = 0x03;
 
 struct __attribute__((packed)) DciPacketV1 {
-  uint8_t magic1;
-  uint8_t magic2;
-  uint8_t version;
-  uint8_t pairId;
+  uint8_t  magic1;
+  uint8_t  magic2;
+  uint8_t  version;
+  uint8_t  pairId;
   uint32_t seq;
-  uint8_t cmd;
-  uint8_t flags;
+  uint8_t  cmd;
+  uint8_t  flags;
   uint16_t reserved;
 };
 
 static_assert(sizeof(DciPacketV1) == 12, "Unexpected DciPacketV1 size");
+
+// ===== build mark =====
+static const char kSig[] PROGMEM = "asx-98";
 
 // ================== OTA state ==================
 static bool otaModeActive = false;
@@ -74,37 +102,119 @@ static bool otaLedState = false;
 
 // ---------- LED helpers ----------
 static void setStatusLed(bool on) {
-  // NodeMCU LED is usually active LOW
   digitalWrite(PIN_STATUS_LED, on ? LOW : HIGH);
 }
 
 static void blinkStatusLedTask(uint32_t intervalMs) {
   uint32_t now = millis();
-  if (now - otaLedLastToggleMs >= intervalMs) {
+  if ((uint32_t)(now - otaLedLastToggleMs) >= intervalMs) {
     otaLedLastToggleMs = now;
     otaLedState = !otaLedState;
     setStatusLed(otaLedState);
   }
 }
 
+// ---------- EEPROM helpers ----------
+static uint32_t loadSeq() {
+  uint32_t value = 0;
+  EEPROM.get(EEPROM_SEQ_ADDR, value);
+  if (value == 0xFFFFFFFFUL) {
+    value = 0;
+  }
+  return value;
+}
+
+static void saveSeq(uint32_t value) {
+  EEPROM.put(EEPROM_SEQ_ADDR, value);
+  EEPROM.commit();
+}
+
+// ---------- Packet logging ----------
+static void printPacket(const DciPacketV1& pkt) {
+#if ENABLE_LOGGING
+  LOG_PRINT("Packet: pairId=0x");
+  LOG_PRINT_HEX(pkt.pairId);
+  LOG_PRINT(" seq=");
+  LOG_PRINT(pkt.seq);
+  LOG_PRINT(" cmd=");
+  LOG_PRINT(pkt.cmd);
+  LOG_PRINT(" flags=0x");
+  LOG_PRINT_HEX(pkt.flags);
+  LOG_PRINT(" reserved=0x");
+  LOG_PRINTLN_HEX(pkt.reserved);
+#endif
+}
+
+// ---------- Packet send ----------
+static bool sendOnePacket(const DciPacketV1& pkt) {
+  LoRa.beginPacket();
+  size_t written = LoRa.write((const uint8_t*)&pkt, sizeof(pkt));
+
+  // Keep blocking send. This is intentional:
+  // the device sleeps immediately after sending, so async TX is unsafe here.
+  int ret = LoRa.endPacket();
+
+  return (written == sizeof(pkt) && ret == 1);
+}
+
+static void sendTriggerCommand() {
+  seq++;
+  saveSeq(seq);
+
+  DciPacketV1 pkt;
+  pkt.magic1   = DCI_MAGIC1;
+  pkt.magic2   = DCI_MAGIC2;
+  pkt.version  = DCI_VERSION;
+  pkt.pairId   = DCI_PAIR_ID;
+  pkt.seq      = seq;
+  pkt.cmd      = DCI_CMD_TRIGGER;
+  pkt.flags    = 0;
+  pkt.reserved = 0;
+
+  printPacket(pkt);
+
+  for (uint8_t i = 0; i < TX_REPEATS; i++) {
+    bool ok = sendOnePacket(pkt);
+
+#if ENABLE_LOGGING
+    LOG_PRINT("TX ");
+    LOG_PRINT(i + 1);
+    LOG_PRINT("/");
+    LOG_PRINT(TX_REPEATS);
+    LOG_PRINT(" -> ");
+    LOG_PRINTLN(ok ? "OK" : "FAIL");
+#endif
+
+    if ((i + 1) < TX_REPEATS) {
+      delay(TX_REPEAT_GAP_MS);
+    }
+  }
+
+  LOG_PRINTLN("Trigger packet send complete.");
+}
+
 // ---------- OTA helpers ----------
-static void initOtaPins() {
+static void initPins() {
   pinMode(PIN_STATUS_LED, OUTPUT);
   setStatusLed(false);
 
   pinMode(PIN_OTA_BUTTON, INPUT_PULLUP);
+  // pinMode(PIN_BUTTON, INPUT_PULLUP);
 }
 
 static bool shouldEnterOtaMode() {
-  // Button pressed = LOW
+  // Fast exit in normal case: no extra wait unless button is actually pressed
   if (digitalRead(PIN_OTA_BUTTON) != LOW) {
     return false;
   }
 
-  // Small hold check to avoid accidental entry
+  // Deliberate hold to avoid accidental OTA entry
+  const uint32_t holdMs = 900;
   uint32_t startMs = millis();
-  while (millis() - startMs < 1200) {
+
+  while ((uint32_t)(millis() - startMs) < holdMs) {
     if (digitalRead(PIN_OTA_BUTTON) != LOW) {
+      setStatusLed(false);
       return false;
     }
     blinkStatusLedTask(120);
@@ -118,34 +228,45 @@ static bool shouldEnterOtaMode() {
 static void startOtaMode() {
   otaModeActive = true;
 
-  Serial.println();
-  Serial.println("OTA trigger detected.");
-  Serial.println("Entering OTA mode...");
+  LOG_NL();
+  LOG_PRINTLN("OTA trigger detected.");
+  LOG_PRINTLN("Entering OTA mode...");
 
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  WiFi.hostname(OTA_HOSTNAME);     // station hostname for AP/router client list
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  Serial.print("Connecting to WiFi");
+  LOG_PRINT("Connecting to WiFi");
 
-  uint32_t wifiStartMs = millis();
+  uint32_t lastDotMs = 0;
+  uint32_t lastStatusMs = millis();
+
   while (WiFi.status() != WL_CONNECTED) {
     blinkStatusLedTask(150);
-    Serial.print(".");
-    delay(250);
 
-    // keep trying, but print a status every ~10 sec
-    if (millis() - wifiStartMs > 10000) {
-      Serial.println();
-      Serial.println("Still trying to connect to WiFi...");
-      wifiStartMs = millis();
+    uint32_t now = millis();
+    if ((uint32_t)(now - lastDotMs) >= 250) {
+      lastDotMs = now;
+      LOG_PRINT(".");
     }
+
+    if ((uint32_t)(now - lastStatusMs) >= 10000) {
+      lastStatusMs = now;
+      LOG_NL();
+      LOG_PRINTLN("Still trying to connect to WiFi...");
+    }
+
+    delay(10);
+    yield();
   }
 
-  Serial.println();
-  Serial.println("WiFi connected.");
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
+  LOG_NL();
+  LOG_PRINTLN("WiFi connected.");
+  LOG_PRINT("IP: ");
+  LOG_PRINTLN(WiFi.localIP());
+  LOG_PRINT("WiFi hostname: ");
+  LOG_PRINTLN(OTA_HOSTNAME);
 
   ArduinoOTA.setHostname(OTA_HOSTNAME);
 
@@ -155,61 +276,58 @@ static void startOtaMode() {
 
   ArduinoOTA.onStart([]() {
     setStatusLed(true);
-    Serial.println("OTA update started.");
+    LOG_PRINTLN("OTA update started.");
   });
 
   ArduinoOTA.onEnd([]() {
     setStatusLed(false);
-    Serial.println();
-    Serial.println("OTA update finished.");
+    LOG_NL();
+    LOG_PRINTLN("OTA update finished.");
   });
 
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    static uint32_t lastPrintMs = 0;
-
-    // blink during OTA transfer too
     blinkStatusLedTask(80);
 
+#if ENABLE_LOGGING
+    static uint32_t lastPrintMs = 0;
     uint32_t now = millis();
-    if (now - lastPrintMs >= 1000) {
+    if ((uint32_t)(now - lastPrintMs) >= 1000) {
       lastPrintMs = now;
-
-      unsigned int percent = 0;
-      if (total > 0) {
-        percent = (progress * 100U) / total;
-      }
-
-      Serial.print("OTA progress: ");
-      Serial.print(percent);
-      Serial.println("%");
+      unsigned int percent = (total > 0) ? ((progress * 100U) / total) : 0;
+      LOG_PRINT("OTA progress: ");
+      LOG_PRINT(percent);
+      LOG_PRINTLN("%");
     }
+#endif
   });
 
   ArduinoOTA.onError([](ota_error_t error) {
     setStatusLed(false);
 
-    Serial.print("OTA error: ");
-    Serial.println((int)error);
+#if ENABLE_LOGGING
+    LOG_PRINT("OTA error: ");
+    LOG_PRINTLN((int)error);
 
     if (error == OTA_AUTH_ERROR) {
-      Serial.println("Auth failed");
+      LOG_PRINTLN("Auth failed");
     } else if (error == OTA_BEGIN_ERROR) {
-      Serial.println("Begin failed");
+      LOG_PRINTLN("Begin failed");
     } else if (error == OTA_CONNECT_ERROR) {
-      Serial.println("Connect failed");
+      LOG_PRINTLN("Connect failed");
     } else if (error == OTA_RECEIVE_ERROR) {
-      Serial.println("Receive failed");
+      LOG_PRINTLN("Receive failed");
     } else if (error == OTA_END_ERROR) {
-      Serial.println("End failed");
+      LOG_PRINTLN("End failed");
     }
+#endif
   });
 
   ArduinoOTA.begin();
 
-  Serial.println("OTA ready.");
-  Serial.print("Hostname: ");
-  Serial.println(OTA_HOSTNAME);
-  Serial.println("LED will blink while OTA mode is active.");
+  LOG_PRINTLN("OTA ready.");
+  LOG_PRINT("Hostname: ");
+  LOG_PRINTLN(OTA_HOSTNAME);
+  LOG_PRINTLN("LED will blink while OTA mode is active.");
 }
 
 static void handleOtaMode() {
@@ -218,108 +336,33 @@ static void handleOtaMode() {
   yield();
 }
 
-// ---------- EEPROM helpers ----------
-static uint32_t loadSeq() {
-  uint32_t value = 0;
-  EEPROM.get(EEPROM_SEQ_ADDR, value);
-
-  if (value == 0xFFFFFFFFUL) {
-    value = 0;
-  }
-  return value;
-}
-
-static void saveSeq(uint32_t value) {
-  EEPROM.put(EEPROM_SEQ_ADDR, value);
-  EEPROM.commit();
-}
-
-// ---------- Packet send ----------
-static bool sendOnePacket(const DciPacketV1& pkt) {
-  LoRa.beginPacket();
-  size_t written = LoRa.write((const uint8_t*)&pkt, sizeof(pkt));
-  int ret = LoRa.endPacket();  // blocking send
-  return (written == sizeof(pkt) && ret == 1);
-}
-
-static void printPacket(const DciPacketV1& pkt) {
-  Serial.print("Packet: ");
-  Serial.print("pairId=0x");
-  Serial.print(pkt.pairId, HEX);
-  Serial.print(" seq=");
-  Serial.print(pkt.seq);
-  Serial.print(" cmd=");
-  Serial.print(pkt.cmd);
-  Serial.print(" flags=0x");
-  Serial.print(pkt.flags, HEX);
-  Serial.print(" reserved=0x");
-  Serial.println(pkt.reserved, HEX);
-}
-
-static void sendTriggerCommand() {
-  seq++;
-  saveSeq(seq);
-
-  DciPacketV1 pkt;
-  pkt.magic1 = DCI_MAGIC1;
-  pkt.magic2 = DCI_MAGIC2;
-  pkt.version = DCI_VERSION;
-  pkt.pairId = DCI_PAIR_ID;
-  pkt.seq = seq;
-  pkt.cmd = DCI_CMD_TRIGGER;
-  pkt.flags = 0;
-  pkt.reserved = 0;
-
-  printPacket(pkt);
-
-  for (uint8_t i = 0; i < TX_REPEATS; i++) {
-    bool ok = sendOnePacket(pkt);
-
-    Serial.print("TX ");
-    Serial.print(i + 1);
-    Serial.print("/");
-    Serial.print(TX_REPEATS);
-    Serial.print(" -> ");
-    Serial.println(ok ? "OK" : "FAIL");
-
-    if (i + 1 < TX_REPEATS) {
-      delay(TX_REPEAT_GAP_MS);
-    }
-  }
-
-  Serial.println("Trigger packet send complete.");
-}
-
 // ---------- Normal LoRa operation ----------
 static void runNormalOperation() {
-  // Power saving: disable WiFi fully
   WiFi.persistent(false);
   WiFi.mode(WIFI_OFF);
   WiFi.forceSleepBegin();
-  delay(1);
-
-  pinMode(PIN_BUTTON, INPUT_PULLUP);
+  delay(1);   // keep this one; ESP8266 needs a tiny settle time here
 
   EEPROM.begin(EEPROM_SIZE);
   seq = loadSeq();
 
-  Serial.println();
-  Serial.println("Starting LoRa TX (RFM96W 433MHz)...");
-  Serial.print("Last stored seq = ");
-  Serial.println(seq);
-  Serial.print("DCI pair ID = 0x");
-  Serial.println(DCI_PAIR_ID, HEX);
+  LOG_NL();
+  LOG_PRINTLN("Starting LoRa TX (RFM96W 433MHz)...");
+  LOG_PRINT("Last stored seq = ");
+  LOG_PRINTLN(seq);
+  LOG_PRINT("DCI pair ID = 0x");
+  LOG_PRINTLN_HEX(DCI_PAIR_ID);
 
   LoRa.setPins(PIN_LORA_SS, PIN_LORA_RST, PIN_LORA_DIO0);
 
   if (!LoRa.begin(433E6)) {
-    Serial.println("LoRa begin failed! Check wiring / power / frequency.");
-    delay(100);
+    LOG_PRINTLN("LoRa begin failed! Check wiring / power / frequency.");
+    LOG_FLUSH();
     ESP.deepSleep(0);
     return;
   }
 
-  // MUST match receiver exactly
+  // Must match current low-latency receiver profile
   LoRa.enableCrc();
   LoRa.setSpreadingFactor(7);
   LoRa.setSignalBandwidth(125E3);
@@ -328,22 +371,19 @@ static void runNormalOperation() {
   LoRa.setSyncWord(0x12);
   LoRa.setTxPower(17);
 
-  Serial.println("Radio configured.");
-  Serial.println("Sending command now...");
+  LOG_PRINTLN("Radio configured.");
+  LOG_PRINTLN("Sending command now...");
 
   sendTriggerCommand();
 
-  Serial.println("Going to deep sleep now. Wake again by RESET button.");
-  delay(200);
-
+  LOG_PRINTLN("Going to deep sleep now.");
+  LOG_FLUSH();
   ESP.deepSleep(0);
 }
 
 void setup() {
-  Serial.begin(9600);
-  delay(100);
-
-  initOtaPins();
+  LOG_BEGIN();
+  initPins();
 
   if (shouldEnterOtaMode()) {
     startOtaMode();
